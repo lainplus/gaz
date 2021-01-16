@@ -1,0 +1,173 @@
+#!/bin/sh
+
+pw_add() {
+	name=$1
+
+	if yn "generate a password?"; then
+		# generate a password by reading /dev/random with tr
+		# tr translates the random bytes into a configurable charset
+		# dd will then read only the wanted password length
+		pass=$(LC_ALL=C tr -dc "${GAZ_PATTERN:-_A-Z-a-z-0-9}" < /dev/random |
+			dd ibs=1 obs=1 count="${GAZ_LENGTH:-50}" 2>/dev/null)
+
+	else
+		sread pass  "enter password"
+		sread pass2 "enter password again"
+
+		[ "$pass" = "$pass2" ] || dir "passwords do not match"
+	fi
+
+	[ "$pass" ] || die "failed to generate a password"
+
+	if [ "$GAZ_KEYID"]; then
+		set -- --trust-model always -aer "$GAZ_KEYID"
+	else
+		set -- -c
+	fi
+
+	"$gpg" "$@" -o "$name.gpg" <<-EOF &&
+		$pass
+	EOF
+	printf '%s\n' "saved '$name' to the store"
+}
+
+pw_del() {
+	yn "delete pass file '$1'?" && {
+		rm -f "$1.gpg"
+
+		rmdir -p "${1%/*}" 2>/dev/null || :
+	}
+}
+
+pw_show() {
+	"$gpg" -dq "$1.gpg"
+}
+
+pw_copy() {
+	: "${GAZ_CLIP:=xclip -sel c}"
+
+	[ "$GAZ_TIMEOUT" != off ] && {
+		printf 'clearing clipboard in "%s" seconds.\n' "${GAZ_TIMEOUT:=15}"
+
+		sleep "$GAZ_TIMEOUT" || kill 0
+		$GAZ_CLIP </dev/null
+	} &
+
+	pw_show "$1" | $GAZ_CLIP
+}
+
+pw_list() {
+	find . -type f -name \*.gpg | sed 's/..//;s/\.gpg$//'
+}
+
+pw_tree() {
+	command -v tree >/dev/null 2>&1 ||
+		die "'tree' command not found"
+
+	tree --noreport | sed 's/\.gpg$//'
+}
+
+yn() {
+	printf '%s [y/n]: ' "$1"
+
+	stty -icanon
+	answer=$(dd ibs=1 count=1 2>/dev/null)
+	stty icanon
+	printf '\n'
+	glob "$answer" '[yY]'
+}
+
+sread() {
+	printf '%s: ' "$2"
+
+	stty -echo
+	read -r "$1"
+	stty echo
+
+	printf '\n'
+}
+
+glob() {
+	case $1 in $2) return 0; esac; return 1
+}
+
+die() {
+	printf 'error: %s.\n' "$1" >&2
+	exit 1
+}
+
+usage() { printf %s "\
+gaz 1.0.0 - simple password manager
+
+usage:
+	-	[a]dd  [name] - create a new password entry
+	-	[c]opy [name] - copy entry to the clipboard
+	-	[d]el  [name] - delete a password entry
+	-	[l]ist		  - list all entries
+	- 	[s]how [name] - show password for an entry
+	-	[t]ree		  - list all entries in a tree
+
+using a key pair:	export GAZ_KEYID=XXXXXXXX
+password length:	export GAZ_LENGTH=50
+password pattern:	export GAZ_PATTERN=_A-Z-a-z-0-9
+store location:		export GAZ_DIR=~/.gaz
+clipboard tool:		export GAZ_CLIP='xclip -sel c'
+clipboard timeout:	export GAZ_TIMEOUT=15 ('off' to disable')
+"
+exit 0
+}
+
+main() {
+	: "${GAZ_DIR:=${XDG_DATA_HOME:=$HOME}/.gaz}"
+
+	command -v gpg  >/dev/null 2>&1 && gpg=gpg
+	command -v gpg2 >/dev/null 2>&1 && gpg=gpg2
+
+	[ "$gpg" ] ||
+		die "gpg not found"
+
+	mkdir -p "$GAZ_DIR" ||
+		die "couldn't make password directory"
+
+	cd "$GAZ_DIR" ||
+		die "can't access password directory"
+
+	glob "$1" '[acds]*' && [ -z "$2" ] &&
+		die "missing [name] argument"
+
+	glob "$1" '[cds]*' && [ ! -f "$2.gpg" ] &&
+		die "pass file '$2' doesn't exist"
+
+	glob "$1" 'a*' && [ -f "$2.gpg" ] &&
+		die "pass file '$2' already exists"
+
+	glob "$2" '*/*' && glob "$2" '*../*' &&
+		die "category out of bounds"
+
+	glob "$2" '/*' &&
+		die "category can't start with '/'"
+
+	glob "$2" '/*' && { mkdir -p "${2%/*}" ||
+		die "couldn't create category '${2%/*}'"; }
+
+	export GPG_TTY=${GPG_TTY:-$(tty)}
+
+	umask 077
+
+	[ -t 1 ] && trap 'stty echo icanon' INT EXIT
+
+	case $1 in
+		a*) pw_add	"$2" ;;
+		c*) pw_copy	"$2" ;;
+		d*) pw_del	"$2" ;;
+		s*) pw_show	"$2" ;;
+		l*)	pw_list	;;
+		t*) pw_tree ;;
+		*)	usage
+	esac
+}
+
+set +x
+set -f
+
+[ "$1" ] || usage && main "$@"
